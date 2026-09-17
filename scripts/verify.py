@@ -314,6 +314,121 @@ def check_empty_arrays() -> None:
     )
 
 
+def check_alternatives_unique_optimum_positive_gap() -> None:
+    # MATCH at drift 2000 (cost 2000) is the unique optimum; the next path
+    # DELETE+INSERT costs 5000, so the cost gap is strictly positive.
+    body = _align(
+        {
+            "planned": [{"code": "A", "at_ms": 1000}],
+            "actual": [{"code": "A", "at_ms": 3000}],
+            "alternative_limit": 5,
+        }
+    )
+    _expect_equal("positive-gap primary ops", [p["op"] for p in body["pairs"]], ["MATCH"])
+    alts = body["alternatives"]
+    _expect_equal("positive-gap runner count", len(alts), 2)
+    first = alts[0]
+    _expect_equal(
+        "positive-gap alternative keys",
+        list(first),
+        [
+            "total_cost",
+            "cost_gap",
+            "pairs",
+            "compliant",
+            "first_defect",
+            "first_divergence_index",
+        ],
+    )
+    _expect_equal("positive-gap cost", first["total_cost"], 5000)
+    _expect_equal("positive-gap gap", first["cost_gap"], 3000)
+    _expect_equal(
+        "positive-gap runner ops",
+        [p["op"] for p in first["pairs"]],
+        ["DELETE", "INSERT"],
+    )
+    _expect_equal("positive-gap divergence", first["first_divergence_index"], 0)
+    _expect_equal("positive-gap defect", first["first_defect"]["code"], "MISS")
+
+
+def check_alternatives_duplicate_code_tie() -> None:
+    # Duplicate planned codes split the optimum across two equal-cost paths:
+    # MATCH,DELETE and DELETE,MATCH both cost 3000, so the gap is 0 and the
+    # first defect moves from pair index 1 to pair index 0 -- the reviewer can
+    # see whether the verdict depends on the tie-break.
+    body = _align(
+        {
+            "planned": [
+                {"code": "A", "at_ms": 0},
+                {"code": "A", "at_ms": 1000},
+            ],
+            "actual": [{"code": "A", "at_ms": 500}],
+            "alternative_limit": 1,
+        }
+    )
+    alts = body["alternatives"]
+    _expect_equal("duplicate-code runner count", len(alts), 1)
+    alt = alts[0]
+    _expect_equal("duplicate-code zero gap", alt["cost_gap"], 0)
+    _expect_equal(
+        "duplicate-code runner ops",
+        [p["op"] for p in alt["pairs"]],
+        ["DELETE", "MATCH"],
+    )
+    _expect_equal("duplicate-code divergence", alt["first_divergence_index"], 0)
+    _expect_equal("primary defect index", body["first_defect"]["pair_index"], 1)
+    _expect_equal("runner defect index", alt["first_defect"]["pair_index"], 0)
+
+
+def check_alternatives_insufficient_paths() -> None:
+    # Two empty sequences have exactly one legal path; limit asks for 20
+    # alternatives but only the real (zero) count may come back.
+    body = _align({"planned": [], "actual": [], "alternative_limit": 20})
+    _expect_equal("insufficient paths field present", "alternatives" in body, True)
+    _expect_equal("insufficient paths value", body["alternatives"], [])
+
+
+def check_legacy_request_byte_compatible() -> None:
+    # Requests without alternative_limit must be answered by the exact legacy
+    # contract: no alternatives key at all, byte-stable across calls.
+    payload = {
+        "planned": [
+            {"code": "A", "at_ms": 0},
+            {"code": "A", "at_ms": 1000},
+        ],
+        "actual": [{"code": "A", "at_ms": 500}],
+    }
+    _, first = _request("POST", "/align", payload=payload)
+    if "alternatives" in first:
+        raise CheckFailed("legacy response must not carry alternatives")
+    _expect_equal(
+        "legacy response keys",
+        list(first),
+        ["compliant", "total_cost", "pairs", "first_defect"],
+    )
+    for _ in range(2):
+        _, again = _request("POST", "/align", payload=payload)
+        _expect_equal("legacy response must be byte-stable", again, first)
+
+
+def check_alternative_limit_validation() -> None:
+    base = {"planned": [], "actual": []}
+    for bad in (0, 21, -1, True, False, 1.5, "1", None):
+        status, body = _request("POST", "/align", payload={**base, "alternative_limit": bad})
+        _expect_equal(f"alternative_limit={bad!r} status", status, 422)
+        codes = [d["code"] for d in body["error"]["details"]]
+        _expect_equal(
+            f"alternative_limit={bad!r} code",
+            "INVALID_ALTERNATIVE_LIMIT" in codes,
+            True,
+        )
+    for good in (1, 20):
+        status, body = _request(
+            "POST", "/align", payload={**base, "alternative_limit": good}
+        )
+        _expect_equal(f"alternative_limit={good} status", status, 200)
+
+
 def check_determinism() -> None:
     payload = {
         "planned": [
@@ -411,6 +526,11 @@ CHECKS = [
     ("multiple equal-cost paths", check_multi_equal_cost_paths),
     ("first defect is leftmost", check_first_defect_is_leftmost),
     ("empty arrays", check_empty_arrays),
+    ("alternatives positive gap", check_alternatives_unique_optimum_positive_gap),
+    ("alternatives duplicate-code tie", check_alternatives_duplicate_code_tie),
+    ("alternatives insufficient paths", check_alternatives_insufficient_paths),
+    ("legacy request byte compatibility", check_legacy_request_byte_compatible),
+    ("alternative_limit validation", check_alternative_limit_validation),
     ("determinism across calls", check_determinism),
     ("validation machine codes", check_validation_codes),
 ]

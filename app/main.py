@@ -85,6 +85,6 @@ async def post_align(request: Request) -> JSONResponse:
         raise RequestValidationFailed(
             [ErrorDetail(INVALID_PAYLOAD, "$", "request body must be valid JSON")]
         )
-    planned, actual = validate_payload(body)
-    result = align(planned, actual)
+    planned, actual, alternative_limit = validate_payload(body)
+    result = align(planned, actual, alternative_limit=alternative_limit)
     return JSONResponse(content=alignment_to_dict(result))
