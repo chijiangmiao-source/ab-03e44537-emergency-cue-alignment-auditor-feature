@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .align import align
+from .align import align, align_with_alternatives
 from .schemas import AlignResponse, ErrorResponse, alignment_to_dict
 from .validation import (
     INVALID_PAYLOAD,
@@ -85,6 +85,9 @@ async def post_align(request: Request) -> JSONResponse:
         raise RequestValidationFailed(
             [ErrorDetail(INVALID_PAYLOAD, "$", "request body must be valid JSON")]
         )
-    planned, actual = validate_payload(body)
-    result = align(planned, actual)
-    return JSONResponse(content=alignment_to_dict(result))
+    planned, actual, alternative_limit = validate_payload(body)
+    if alternative_limit is None:
+        result = align(planned, actual)
+        return JSONResponse(content=alignment_to_dict(result))
+    preferred, alternatives = align_with_alternatives(planned, actual, alternative_limit)
+    return JSONResponse(content=alignment_to_dict(preferred, alternatives))

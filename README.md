@@ -12,6 +12,8 @@ Python 3.13 + FastAPI 纯后端。接收含 `planned`、`actual` 两数组的 JS
 
 对齐使**总成本最小**。总成本并列时，按**完整操作串字典序**裁决，操作顺序固定为 `MATCH` < `DELETE` < `INSERT`。操作串与路径一一对应，因此重复 `code` 也只有一条最优路径，同一请求逐次调用结果逐字节一致。
 
+请求可附带 `alternative_limit`（1–20 的整数），在最优结果之外按同一排名返回紧随其后的候选路径，供复核人员判断首个缺陷是否依赖裁决。
+
 ## 合规判定
 
 仅当路径**全为 `MATCH`** 且每项漂移 **≤ 500 ms** 时 `compliant = true`。否则响应携带总成本、完整配对，以及路径中**从左到右首个缺陷**。
@@ -78,6 +80,37 @@ Python 3.13 + FastAPI 纯后端。接收含 `planned`、`actual` 两数组的 JS
 
 `pairs` 中 `DELETE` 项只带 `planned_*` 字段，`INSERT` 项只带 `actual_*` 字段，`MATCH` 项两者俱全并附 `drift_ms`。
 
+### 候选路径（`alternative_limit`）
+
+请求体可附带顶层字段 `alternative_limit`：1–20 的非布尔整数，省略时请求与响应保持原样。非法值整体返回 422，机器码 `INVALID_ALTERNATIVE_LIMIT`。
+
+提供时，响应在末尾追加 `alternatives`：按“总成本、完整操作串”排名紧随首选路径之后的候选，最多 `alternative_limit` 条；合法路径不足时返回实际数量，且不含重复路径。每项字段依次为：
+
+- `total_cost`：该候选的总成本
+- `cost_gap`：相对首选路径的成本差（≥ 0，等成本分叉时为 0）
+- `pairs`：完整配对，字段规则同上
+- `compliant`：该候选的合规结论
+- `first_defect`：该候选从左到右的首个缺陷（无则 `null`）
+- `first_divergence_index`：与首选路径首次不同的操作索引
+
+```json
+"alternatives": [
+  {
+    "total_cost": 3000,
+    "cost_gap": 0,
+    "pairs": [
+      {"op": "DELETE", "cost": 2500, "code": "ADS1", "planned_index": 0, "planned_at_ms": 1000},
+      {"op": "MATCH", "cost": 500, "code": "ADS1", "planned_index": 1, "actual_index": 0, "planned_at_ms": 2000, "actual_at_ms": 1500, "drift_ms": 500}
+    ],
+    "compliant": false,
+    "first_defect": {"code": "MISS", "pair_index": 0, "pair": {"op": "DELETE", "cost": 2500, "code": "ADS1", "planned_index": 0, "planned_at_ms": 1000}},
+    "first_divergence_index": 0
+  }
+]
+```
+
+候选由每个后缀至多保留 `limit+1` 条候选的动态规划加回溯生成，不枚举全部路径，也不反复复制完整操作串。
+
 ### `GET /healthz`
 
 返回 `{"status": "ok"}`，供容器健康检查使用。
@@ -109,6 +142,7 @@ Python 3.13 + FastAPI 纯后端。接收含 `planned`、`actual` 两数组的 JS
 | `INVALID_CODE` | `code` 不是匹配 `[A-Z0-9]{1,16}` 的字符串 |
 | `INVALID_AT_MS` | `at_ms` 不是非负整数（含布尔、浮点、字符串、负数） |
 | `NOT_STRICTLY_INCREASING` | 数组时间未严格递增 |
+| `INVALID_ALTERNATIVE_LIMIT` | `alternative_limit` 不是 1–20 的非布尔整数 |
 
 同一非法请求逐次返回的响应体逐字节一致。
 
@@ -120,7 +154,7 @@ pytest                      # 穷举小序列对照暴力枚举 + 平局/边界/
 uvicorn app.main:app --port 8000
 ```
 
-测试以暴力枚举全部对齐路径为独立判据，穷举长度为 0–4、时间网格含恰好 500/2000 ms 边界的全部序列对（81×81），另有种子化随机模糊用例与显式平局用例。
+测试以暴力枚举全部对齐路径为独立判据，穷举长度为 0–4、时间网格含恰好 500/2000 ms 边界的全部序列对（81×81），并对长度 ≤ 3 的序列对逐项核对候选路径的前列名次，另有种子化随机模糊用例与显式平局用例。
 
 ## Docker
 
@@ -130,4 +164,4 @@ API_PORT=9000 docker compose up api        # 由 API_PORT 覆盖宿主机端口
 docker compose up --exit-code-from verify  # 一次性验收：14 项检查，退出码即结果
 ```
 
-`verify` 服务依赖 `api` 健康检查后启动，对运行中的 API 执行合规、500/2000 ms 边界、重复码平局、多条等成本路径、逐次一致性与 422 机器码等验收，全部通过则以 0 退出。算法复杂度为 O(n·m) 时间与空间（n、m 为两数组长度）。
+`verify` 服务依赖 `api` 健康检查后启动，对运行中的 API 执行合规、500/2000 ms 边界、重复码平局、多条等成本路径、逐次一致性与 422 机器码等验收，全部通过则以 0 退出。算法复杂度为 O(n·m·k) 时间与空间（n、m 为两数组长度，k 为每个后缀保留的候选数：未启用候选路径时 k=1，启用时 k=`alternative_limit`+1）。

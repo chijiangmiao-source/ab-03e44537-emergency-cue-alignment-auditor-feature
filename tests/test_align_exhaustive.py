@@ -21,6 +21,7 @@ from app.align import (
     MATCH_MAX_DRIFT_MS,
     Item,
     align,
+    align_with_alternatives,
 )
 
 OP_RANK = {"MATCH": 0, "DELETE": 1, "INSERT": 2}
@@ -54,14 +55,35 @@ def brute_force(planned: list[Item], actual: list[Item]) -> tuple[int, tuple[int
     return best
 
 
-def assert_alignment_matches_oracle(planned: list[Item], actual: list[Item]) -> None:
-    result = align(planned, actual)
-    expected_cost, expected_ops = brute_force(planned, actual)
+def brute_force_ranked(
+    planned: list[Item], actual: list[Item]
+) -> list[tuple[int, tuple[int, ...]]]:
+    """Enumerate every legal path and return them all, sorted by
+    ``(total_cost, ranked operation string)``."""
+    paths: list[tuple[int, tuple[int, ...]]] = []
 
-    got_ops = tuple(OP_RANK[pair.op] for pair in result.pairs)
-    assert result.total_cost == expected_cost, (planned, actual)
-    assert got_ops == expected_ops, (planned, actual)
+    def rec(i: int, j: int, cost: int, ops: list[int]) -> None:
+        if i == len(planned) and j == len(actual):
+            paths.append((cost, tuple(ops)))
+            return
+        if i < len(planned) and j < len(actual):
+            p, a = planned[i], actual[j]
+            drift = abs(p.at_ms - a.at_ms)
+            if p.code == a.code and drift <= MATCH_MAX_DRIFT_MS:
+                rec(i + 1, j + 1, cost + drift, ops + [OP_RANK["MATCH"]])
+        if i < len(planned):
+            rec(i + 1, j, cost + DELETE_COST, ops + [OP_RANK["DELETE"]])
+        if j < len(actual):
+            rec(i, j + 1, cost + INSERT_COST, ops + [OP_RANK["INSERT"]])
 
+    rec(0, 0, 0, [])
+    paths.sort()
+    return paths
+
+
+def assert_pairs_consistent(
+    planned: list[Item], actual: list[Item], result
+) -> None:
     # The reported pairs must cover every item exactly once, in order.
     planned_idx = [p.planned_index for p in result.pairs if p.planned_index is not None]
     actual_idx = [p.actual_index for p in result.pairs if p.actual_index is not None]
@@ -105,6 +127,54 @@ def assert_alignment_matches_oracle(planned: list[Item], actual: list[Item]) -> 
         else:
             assert defect.code == "DRIFT"
             assert bad.drift_ms > DRIFT_TOLERANCE_MS
+
+
+def assert_alignment_matches_oracle(planned: list[Item], actual: list[Item]) -> None:
+    result = align(planned, actual)
+    expected_cost, expected_ops = brute_force(planned, actual)
+
+    got_ops = tuple(OP_RANK[pair.op] for pair in result.pairs)
+    assert result.total_cost == expected_cost, (planned, actual)
+    assert got_ops == expected_ops, (planned, actual)
+    assert_pairs_consistent(planned, actual, result)
+
+
+def assert_ranked_matches_oracle(
+    planned: list[Item], actual: list[Item], limit: int
+) -> None:
+    ranked = brute_force_ranked(planned, actual)
+    # The oracle never produces duplicate operation strings, and neither may
+    # the implementation under test.
+    assert len({ops for _, ops in ranked}) == len(ranked)
+
+    preferred, alternatives = align_with_alternatives(planned, actual, limit)
+    # The preferred path must be exactly what plain align() returns.
+    assert preferred == align(planned, actual)
+
+    expected = ranked[: limit + 1]
+    # When fewer legal paths exist than requested, the actual count comes back.
+    assert len(alternatives) == len(expected) - 1
+
+    seen: set[tuple[int, ...]] = set()
+    for (cost, ops), result in zip(expected, [preferred, *alternatives]):
+        assert result.total_cost == cost
+        result_ops = tuple(OP_RANK[pair.op] for pair in result.pairs)
+        assert result_ops == ops
+        assert result_ops not in seen
+        seen.add(result_ops)
+        assert_pairs_consistent(planned, actual, result)
+
+    for alternative in alternatives:
+        assert alternative.cost_gap == alternative.total_cost - preferred.total_cost
+        assert alternative.cost_gap >= 0
+        divergence = next(
+            index
+            for index, (left, right) in enumerate(
+                zip(preferred.pairs, alternative.pairs)
+            )
+            if left.op != right.op
+        )
+        assert alternative.first_divergence_index == divergence
 
 
 # Time grid chosen so that consecutive timestamps differ by exactly 500 or
@@ -152,3 +222,24 @@ def test_repeated_calls_are_identical() -> None:
     first = align(planned, actual)
     for _ in range(5):
         assert align(planned, actual) == first
+
+
+# Sequences of length at most 3 keep full path enumeration cheap, so the
+# ranked oracle can check the front of the ranking entry by entry.
+SHORT_SEQUENCES = [seq for seq in GRID_SEQUENCES if len(seq) <= 3]
+
+
+@pytest.mark.parametrize("p_idx", range(len(SHORT_SEQUENCES)))
+def test_exhaustive_ranked_grid(p_idx: int) -> None:
+    planned = SHORT_SEQUENCES[p_idx]
+    for actual in SHORT_SEQUENCES:
+        for limit in (1, 3, 20):
+            assert_ranked_matches_oracle(planned, actual, limit)
+
+
+def test_seeded_ranked_fuzz() -> None:
+    rng = random.Random(20260917)
+    for _ in range(150):
+        planned = _random_sequence(rng, max_len=4)
+        actual = _random_sequence(rng, max_len=4)
+        assert_ranked_matches_oracle(planned, actual, limit=rng.choice([1, 2, 5]))

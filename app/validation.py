@@ -20,10 +20,14 @@ UNEXPECTED_FIELD = "UNEXPECTED_FIELD"
 INVALID_CODE = "INVALID_CODE"
 INVALID_AT_MS = "INVALID_AT_MS"
 NOT_STRICTLY_INCREASING = "NOT_STRICTLY_INCREASING"
+INVALID_ALTERNATIVE_LIMIT = "INVALID_ALTERNATIVE_LIMIT"
 
 CODE_PATTERN = re.compile(r"[A-Z0-9]{1,16}")
 ITEM_FIELDS = frozenset({"code", "at_ms"})
 ARRAY_NAMES = ("planned", "actual")
+
+ALTERNATIVE_LIMIT_MIN = 1
+ALTERNATIVE_LIMIT_MAX = 20
 
 _MISSING = object()
 
@@ -85,12 +89,35 @@ def _validate_item(entry: object, path: str, details: list[ErrorDetail]) -> Item
     return None
 
 
-def validate_payload(body: object) -> tuple[list[Item], list[Item]]:
-    """Validate the decoded JSON body and return ``(planned, actual)``.
+def _parse_alternative_limit(value: object, details: list[ErrorDetail]) -> int | None:
+    """Validate the optional ``alternative_limit`` field (1..20, non-bool int)."""
+    if value is _MISSING:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not ALTERNATIVE_LIMIT_MIN <= value <= ALTERNATIVE_LIMIT_MAX
+    ):
+        details.append(
+            ErrorDetail(
+                INVALID_ALTERNATIVE_LIMIT,
+                "alternative_limit",
+                f"must be an integer between "
+                f"{ALTERNATIVE_LIMIT_MIN} and {ALTERNATIVE_LIMIT_MAX}",
+            )
+        )
+        return None
+    return value
 
+
+def validate_payload(body: object) -> tuple[list[Item], list[Item], int | None]:
+    """Validate the decoded JSON body and return ``(planned, actual, limit)``.
+
+    ``limit`` is the optional ``alternative_limit`` (``None`` when omitted).
     Raises :class:`RequestValidationFailed` with every detected problem in a
-    deterministic order: structural errors first, then item errors in array
-    order, then monotonicity violations.
+    deterministic order: structural errors first (including an invalid
+    ``alternative_limit``), then item errors in array order, then
+    monotonicity violations.
     """
     if not isinstance(body, dict):
         raise RequestValidationFailed(
@@ -107,6 +134,9 @@ def validate_payload(body: object) -> tuple[list[Item], list[Item]]:
             details.append(ErrorDetail(INVALID_TYPE, name, "must be an array"))
         else:
             raw[name] = value
+    alternative_limit = _parse_alternative_limit(
+        body.get("alternative_limit", _MISSING), details
+    )
     if details:
         raise RequestValidationFailed(details)
 
@@ -135,4 +165,4 @@ def validate_payload(body: object) -> tuple[list[Item], list[Item]]:
     if details:
         raise RequestValidationFailed(details)
 
-    return parsed["planned"], parsed["actual"]
+    return parsed["planned"], parsed["actual"], alternative_limit

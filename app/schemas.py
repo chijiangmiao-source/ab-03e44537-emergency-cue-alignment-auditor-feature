@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from .align import Alignment, Pair
+from .align import Alignment, Alternative, Defect, Pair
 
 
 class PairOut(BaseModel):
@@ -26,11 +26,21 @@ class DefectOut(BaseModel):
     pair: PairOut
 
 
+class AlternativeOut(BaseModel):
+    total_cost: int
+    cost_gap: int
+    pairs: list[PairOut]
+    compliant: bool
+    first_defect: DefectOut | None
+    first_divergence_index: int
+
+
 class AlignResponse(BaseModel):
     compliant: bool
     total_cost: int
     pairs: list[PairOut]
     first_defect: DefectOut | None
+    alternatives: list[AlternativeOut] | None = None
 
 
 class ErrorDetailOut(BaseModel):
@@ -65,17 +75,48 @@ def pair_to_dict(pair: Pair) -> dict:
     return data
 
 
-def alignment_to_dict(result: Alignment) -> dict:
+def _defect_to_dict(defect: Defect) -> dict:
+    return {
+        "code": defect.code,
+        "pair_index": defect.pair_index,
+        "pair": pair_to_dict(defect.pair),
+    }
+
+
+def alternative_to_dict(alternative: Alternative) -> dict:
+    """Serialize a runner-up path with its gap to and divergence from the
+    preferred path."""
+    defect = None
+    if alternative.first_defect is not None:
+        defect = _defect_to_dict(alternative.first_defect)
+    return {
+        "total_cost": alternative.total_cost,
+        "cost_gap": alternative.cost_gap,
+        "pairs": [pair_to_dict(pair) for pair in alternative.pairs],
+        "compliant": alternative.compliant,
+        "first_defect": defect,
+        "first_divergence_index": alternative.first_divergence_index,
+    }
+
+
+def alignment_to_dict(
+    result: Alignment, alternatives: list[Alternative] | None = None
+) -> dict:
+    """Serialize the preferred alignment.
+
+    When ``alternatives`` is ``None`` (the request did not ask for them)
+    the body keeps exactly the legacy fields and their order; otherwise the
+    runner-up paths are appended as the trailing ``alternatives`` key.
+    """
     defect = None
     if result.first_defect is not None:
-        defect = {
-            "code": result.first_defect.code,
-            "pair_index": result.first_defect.pair_index,
-            "pair": pair_to_dict(result.first_defect.pair),
-        }
-    return {
+        defect = _defect_to_dict(result.first_defect)
+    data = {
         "compliant": result.compliant,
         "total_cost": result.total_cost,
         "pairs": [pair_to_dict(pair) for pair in result.pairs],
         "first_defect": defect,
     }
+    if alternatives is not None:
+        data["alternatives"] = [alternative_to_dict(alt) for alt in alternatives]
+    return data
